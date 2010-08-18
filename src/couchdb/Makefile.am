@@ -81,9 +81,14 @@ source_files = \
     couch_view_updater.erl \
     couch_view_group.erl \
     couch_db_updater.erl \
-    couch_work_queue.erl
+    couch_work_queue.erl \
+    couch_query_ring.erl \
+    multiview.erl \
+    multiview_httpd.erl \
+    multiview_sup.erl \
+    pmap.erl
 
-EXTRA_DIST = $(source_files) couch_db.hrl couch_js_functions.hrl
+EXTRA_DIST = $(source_files) couch_db.hrl couch_js_functions.hrl multiview.hrl
 
 compiled_files = \
     couch.app \
@@ -141,7 +146,12 @@ compiled_files = \
     couch_view_updater.beam \
     couch_view_group.beam \
     couch_db_updater.beam \
-    couch_work_queue.beam
+    couch_work_queue.beam \
+    couch_query_ring.beam \
+    multiview.beam \
+    multiview_httpd.beam \
+    multiview_sup.beam \
+    pmap.beam
 
 # doc_base = \
 #     erlang.png \
@@ -200,6 +210,7 @@ endif
 
 # $(ERL) -noshell -run edoc_run files [\"$<\"]
 
-%.beam: %.erl couch_db.hrl couch_js_functions.hrl
+%.beam: %.erl couch_db.hrl couch_js_functions.hrl multiview.hrl
 	$(ERLC) $(ERLC_FLAGS) ${TEST} $<;
+
 

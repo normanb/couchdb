@@ -64,6 +64,7 @@ loadTest("list_views.js");
 loadTest("lots_of_docs.js");
 loadTest("method_override.js");
 loadTest("multiple_rows.js");
+loadTest("multiview.js");
 loadScript("script/oauth.js");
 loadScript("script/sha1.js");
 loadTest("oauth.js");
