@@ -1,0 +1,31 @@
+edit local.ini or local_dev.ini and add
+
+[daemons]
+multiview_manager={multiview_sup, start_link, []}
+
+[httpd_db_handlers]
+_multi = {multiview_httpd, handle_request}
+
+
+Compile it:
+
+    ./bootstrap
+    ./configure
+    make dev
+
+Run it:
+
+    ./utils/run
+
+
+---------
+ To test
+---------
+
+curl -verbose -X POST -H "Content-Type: application/json" -d @sample.json "http://localhost:5984/demo/_multi"
+
+where sample.json contains
+
+{"views":[VIEW1, VIEW2, VIEW3, ...]}
+
+the views contained in the JSON document are restricted to the same server, so http://servername:port/ is omitted.
