@@ -39,6 +39,14 @@ couchTests.multiview = function(debug) {
     T(results.rows);
     
     for (row in results.rows)
-      T(parseInt(results.rows[row]) % 12 == 0);      
+      T(parseInt(results.rows[row]) % 12 == 0);
+      
+    // test a single view, this takes its own route
+    multiview_req =  CouchDB.request("POST", multiQueryUrl, {body: JSON.stringify({"views" : ["test_suite_db/_design/three/_view/test"]})});
+    results = JSON.parse(multiview_req.responseText);
 
+    T(results.rows);   
+
+    for (row in results.rows)
+      T(parseInt(results.rows[row]) % 3 == 0); 
 }
