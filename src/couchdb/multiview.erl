@@ -183,7 +183,7 @@ query_view_count(Query, Options, IncludeId) ->
        end;
     _ ->
       % no match return 0
-      {view, nil, 0, Query}
+      {view, nil, [], 0, Query}
   end.
   
 multi_query(QueryObject, Options, CallBackFunc, CallBackState) ->
@@ -206,9 +206,10 @@ multi_query(QueryObject, Options, CallBackFunc, CallBackState) ->
       write_single_response(Ids, CallBackFunc, CallBackState);
    _ ->
       [Start | Rest] = ResultList = lists:keysort(?MULTI_ROWCOUNT_ELEMENT, pmap:pmap(fun(X) -> query_view_count(X, Options, false)  end, Queries)),
-      case erlang:element(?MULTI_ROWCOUNT_ELEMENT, Start) == 0 of
+      
+      NewState = case erlang:element(?MULTI_ROWCOUNT_ELEMENT, Start) == 0 of
         true ->
-          ok;
+          CallBackState;
         _ ->
           couch_query_ring:start(Start, Rest, CallBackFunc, CallBackState)
       end,
@@ -223,11 +224,13 @@ multi_query(QueryObject, Options, CallBackFunc, CallBackState) ->
                 couch_db:close(Db)
             end
         end, 
-        ResultList)
+        ResultList),
+        
+      NewState
   end.
   
-write_single_response([], _CallBackFunc, _CallBackState) ->
-  [];
+write_single_response([], _CallBackFunc, CallBackState) ->
+  CallBackState;
 
 write_single_response([Id | Rem], CallBackFunc, CallBackState) ->
   NewState = CallBackFunc(Id, CallBackState),
@@ -250,3 +253,4 @@ handle_call({multi_query, QueryObject, Options, CallBackFunc, CallBackState}, _F
     {reply, multi_query(QueryObject, Options, CallBackFunc, CallBackState), State}.
   
  
+

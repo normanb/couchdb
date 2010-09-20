@@ -28,29 +28,43 @@ handle_request(#httpd{
       JsonData = couch_httpd:json_body(Req),
       
       % start the json response
-      {ok, Resp} = couch_httpd:start_json_response(Req, 200),
-      couch_httpd:send_chunk(Resp, "{\"rows\": ["),
-      multiview:multiquery(JsonData, [{user_ctx, UserCtx}], fun ?MODULE:callback/2, {Resp, 0}),
-      
-      % close
-      couch_httpd:send_chunk(Resp, "]}"),
-      couch_httpd:end_json_response(Resp)
-      
+      case NewState = multiview:multiquery(JsonData, [{user_ctx, UserCtx}], fun ?MODULE:callback/2, {Req, 0}) of
+        {HttpReq, 0} ->
+           couch_httpd:send_json(HttpReq, ?JSON_DECODE("{\"rows\": []}"));
+        {HttpResp, _Counter} ->
+           {ok, HttpResp};
+         _ ->
+           {ok, nil}
+      end
   end;
-
+ 
 handle_request(Req, _Db) ->
     send_method_not_allowed(Req, "POST").
  
-callback({error, Reason}, {Resp, _}) ->
-  ?LOG_ERROR("Error with multiview ~p", [Reason]),
-  couch_httpd:send_error(Resp, {bad_request, Reason});
+callback({error, Reason}, {Req, _}) ->
+  % (Req, Code, ErrorStr, ReasonStr)
+  couch_httpd:send_error(Req, 500, <<"bad request">>, Reason);
 
-callback(Id, {Resp, Counter}) ->
+callback({finished, Reason}, {HttpReqResp, Counter}) ->
+    % close
+    NewState = case Counter of
+      0 ->
+        {HttpReqResp, 0};
+      _ ->
+        couch_httpd:send_chunk(HttpReqResp, "]}"),
+        couch_httpd:end_json_response(HttpReqResp),
+        {HttpReqResp, Counter + 1}
+    end;
+
+% depending on whether this is the first callback we will have either a HttpReq or an HttpResp object
+callback(Id, {HttpReqResp, Counter}) ->
   case Counter of
      0 ->
-        couch_httpd:send_chunk(Resp, binary_to_list(<<"\"", Id/binary, "\"">>));
+        {ok, Resp} = couch_httpd:start_json_response(HttpReqResp, 200),
+        couch_httpd:send_chunk(Resp, "{\"rows\": [" ++ binary_to_list(<<"\"", Id/binary, "\"">>)),
+        {Resp, Counter + 1};
      _ ->
-        couch_httpd:send_chunk(Resp, binary_to_list(<<",\"", Id/binary, "\"">>))
-  end,
-  {Resp, Counter + 1}.
+        couch_httpd:send_chunk(HttpReqResp, binary_to_list(<<",\"", Id/binary, "\"">>)),
+        {HttpReqResp, Counter + 1}
+  end.
 

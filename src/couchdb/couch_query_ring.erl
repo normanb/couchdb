@@ -123,14 +123,14 @@ gather(PID, CallBackFunc, CallBackState, {Counter, StopCount}) when Counter == S
     die ->
       ok;  
     {_Pid, Id} ->
-      case Id of 
+      NewCallBackState = case Id of 
          [] ->
-           ok;
+           CallBackState;
          _ ->
-          CallBackFunc(Id, CallBackState)
+           CallBackFunc(Id, CallBackState)
       end,
       PID ! die,
-      gather(PID, CallBackFunc, CallBackState, {Counter, StopCount})
+      CallBackFunc({finished, []}, NewCallBackState)
   end;
 
 gather(PID, CallBackFunc, CallBackState, {Counter, StopCount}) ->
@@ -191,9 +191,10 @@ start(StartNode, Nodes, CallBackFunc, CallBackState) when is_tuple(StartNode) ->
            % -record(multiexternal_result, {db = null, row_count=0, id_list}).
             lists:map(fun(X) -> First ! {self(), X} end, StartNode#multiexternal_result.id_list);
           View ->
+            % throw an exception, we shouldn't get here
             V = list_to_binary(atom_to_list(View)),
-            CallBackFunc({error, <<"unsupported view in multiview ",  V/binary>>}, CallBackState)
-      end,       
+            throw({error, <<"unsupported view in multiview ",  V/binary>>})
+      end,  
       StopCount = erlang:element(?MULTI_ROWCOUNT_ELEMENT, StartNode),      
       gather(First, CallBackFunc, CallBackState, {1, StopCount})
    end.
