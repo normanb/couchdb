@@ -229,8 +229,8 @@ multi_query(QueryObject, Options, CallBackFunc, CallBackState) ->
       NewState
   end.
   
-write_single_response([], _CallBackFunc, CallBackState) ->
-  CallBackState;
+write_single_response([], CallBackFunc, CallBackState) ->
+  CallBackFunc({finished, []}, CallBackState);
 
 write_single_response([Id | Rem], CallBackFunc, CallBackState) ->
   NewState = CallBackFunc(Id, CallBackState),
