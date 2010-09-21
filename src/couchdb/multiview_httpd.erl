@@ -1,10 +1,14 @@
-%%----------------------------------------------------------------------------------
-%% File    : multiview_httpd.erl
-%%
-%% Created :  7th July 2010
-%% Author : nbarker
-%%
-%%
+% Licensed under the Apache License, Version 2.0 (the "License"); you may not
+% use this file except in compliance with the License. You may obtain a copy of
+% the License at
+%
+%   http://www.apache.org/licenses/LICENSE-2.0
+%
+% Unless required by applicable law or agreed to in writing, software
+% distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+% WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+% License for the specific language governing permissions and limitations under
+% the License.
 
 -module(multiview_httpd).
 
@@ -28,7 +32,8 @@ handle_request(#httpd{
       JsonData = couch_httpd:json_body(Req),
       
       % start the json response
-      case NewState = multiview:multiquery(JsonData, [{user_ctx, UserCtx}], fun ?MODULE:callback/2, {Req, 0}) of
+      case NewState = multiview:multiquery(JsonData, [{user_ctx, UserCtx}],
+						fun ?MODULE:callback/2, {Req, 0}) of
         {HttpReq, 0} ->
            couch_httpd:send_json(HttpReq, ?JSON_DECODE("{\"rows\": []}"));
         {HttpResp, _Counter} ->
@@ -47,7 +52,7 @@ callback({error, Reason}, {Req, _}) ->
 
 callback({finished, Reason}, {HttpReqResp, Counter}) ->
     % close
-    NewState = case Counter of
+    case Counter of
       0 ->
         {HttpReqResp, 0};
       _ ->
@@ -56,15 +61,17 @@ callback({finished, Reason}, {HttpReqResp, Counter}) ->
         {HttpReqResp, Counter + 1}
     end;
 
-% depending on whether this is the first callback we will have either a HttpReq or an HttpResp object
+% depending on whether this is the first callback we will
+% have either a HttpReq or an HttpResp object
 callback(Id, {HttpReqResp, Counter}) ->
   case Counter of
      0 ->
         {ok, Resp} = couch_httpd:start_json_response(HttpReqResp, 200),
-        couch_httpd:send_chunk(Resp, "{\"rows\": [" ++ binary_to_list(<<"\"", Id/binary, "\"">>)),
+        couch_httpd:send_chunk(Resp, "{\"rows\": [" 
+							  ++ binary_to_list(<<"\"", Id/binary, "\"">>)),
         {Resp, Counter + 1};
      _ ->
-        couch_httpd:send_chunk(HttpReqResp, binary_to_list(<<",\"", Id/binary, "\"">>)),
+        couch_httpd:send_chunk(HttpReqResp, 
+							   binary_to_list(<<",\"", Id/binary, "\"">>)),
         {HttpReqResp, Counter + 1}
   end.
-
