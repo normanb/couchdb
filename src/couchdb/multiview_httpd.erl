@@ -32,7 +32,7 @@ handle_request(#httpd{
       JsonData = couch_httpd:json_body(Req),
       
       % start the json response
-      case NewState = multiview:multiquery(JsonData, [{user_ctx, UserCtx}],
+      case multiview:multiquery(JsonData, [{user_ctx, UserCtx}],
 						fun ?MODULE:callback/2, {Req, 0}) of
         {HttpReq, 0} ->
            couch_httpd:send_json(HttpReq, ?JSON_DECODE("{\"rows\": []}"));
@@ -50,7 +50,7 @@ callback({error, Reason}, {Req, _}) ->
   % (Req, Code, ErrorStr, ReasonStr)
   couch_httpd:send_error(Req, 500, <<"bad request">>, Reason);
 
-callback({finished, Reason}, {HttpReqResp, Counter}) ->
+callback({finished, _Reason}, {HttpReqResp, Counter}) ->
     % close
     case Counter of
       0 ->

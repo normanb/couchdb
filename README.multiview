@@ -1,8 +1,5 @@
 edit local.ini or local_dev.ini and add
 
-[daemons]
-multiview_manager={multiview_sup, start_link, []}
-
 [httpd_db_handlers]
 _multi = {multiview_httpd, handle_request}
 

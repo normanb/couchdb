@@ -29,226 +29,332 @@ multiquery(QueryObject, Options, CallBackFunc, CallBackState) ->
   case length(Queries) of
     1 ->
       % querying a single view, no intersection required
-      [X] = Queries,
-      ResultRec = query_view_count(X, Options, true),
-      Ids = erlang:element(?MULTI_LIST_ELEMENT, ResultRec),
-      write_single_response(Ids, CallBackFunc, CallBackState);
+      [Q] = Queries,
+      %ResultRec = query_view_count(X, Options),
+	  % Ids = erlang:element(?MULTI_LIST_ELEMENT, ResultRec),
+	  % query and write single view
+	  CallBackFunc({finished, []}, 
+		stream_view_intersect(Q, Options, [],  CallBackFunc, CallBackState));
    _ ->
-      [Start | Rest] = ResultList = lists:keysort(?MULTI_ROWCOUNT_ELEMENT,
+      [Start|Rem]= lists:keysort(?MULTI_ROWCOUNT_ELEMENT,
 										lists:map(fun(X) -> 
-											 query_view_count(X, Options, false)
+											 query_view_count(X, Options)
 										    end, Queries)),
       
-      NewState = case erlang:element(?MULTI_ROWCOUNT_ELEMENT, Start) == 0 of
+      case erlang:element(?MULTI_ROWCOUNT_ELEMENT, Start) == 0 of
         true ->
           CallBackState;
         _ ->
-          couch_query_ring:start(Start, Rest, CallBackFunc, CallBackState)
-      end,
-      
-      % close all the open db connections (just references), 
-      lists:map(fun(Record) -> 
-            Db = erlang:element(?MULTI_DB_ELEMENT, Record),
-            case Db of 
-              null -> 
-                ok;
-              _ -> 
-                couch_db:close(Db)
-            end
-        end, 
-        ResultList),
-        
-      NewState
+		  % query each bloom filter for an intersection by folding over the
+		  % smallest view
+		  % TODO for disjoint we will use the largest view and test for 
+		  % not being a view member
+		  NewCallBackState = case Start#bloom_view_result.id_list of
+			  null ->
+				% fold over the smallest view
+				 stream_view_intersect(Start#bloom_view_result.q, Options, Rem, 
+									   CallBackFunc, CallBackState);
+			  _ ->
+				intersect_and_stream(Start#bloom_view_result.id_list, Rem,
+									 CallBackFunc, CallBackState)
+          end,
+		  CallBackFunc({finished, []}, NewCallBackState)
+      end
   end.
 
-query_view_count(Query, Options, IncludeId) ->  
+query_view_count(Query, Options) ->  
   % either design document handlers, db handlers or external
   UrlString = binary_to_list(Query),
   Parts = string:tokens(UrlString, "/"),
-  
-  case Parts of
-    [DbName, "_design", DDocName, "_view", FunctionQueryString] ->
-       [Func | QueryParts] = string:tokens(FunctionQueryString, "?&"),
-       KVP = lists:map(fun(X) ->
-                Idx = string:chr(X, $=),
-                {list_to_binary(
-				   string:to_lower(string:sub_string(X, 1, Idx-1))),
-				  ?JSON_DECODE(string:sub_string(X, Idx+1))}
-            end,
-            QueryParts),
-            
-      % open the view 
-      {ok, Db} = couch_db:open(list_to_binary(DbName), Options),
-              
-      {View, _Group} = case couch_view:get_map_view(Db, 
-									list_to_binary(["_design/", DDocName]),
-									list_to_binary(Func), nil) of
-          {ok, V, G} ->
-              {V, G}; 
-          {not_found, _Reason} ->
-              case couch_view:get_reduce_view(Db, 
-						list_to_binary(["_design/", DDocName]),
-					    list_to_binary(Func), nil) of
-                {ok, ReduceView, G} ->
-                   % we need the ids so get the map view
-                   {couch_view:extract_map_view(ReduceView), G};
-                _ ->
-                  {null, null}
-              end
-       end,
+  case Result = query_view(Query, Parts, Options) of 
+	  nil ->
+        % no match return 0
+        {view, nil, [], 0, Query};
+	  _ ->
+       Result
+  end.
 
-       {{RowCount, IdAcc}, QueryArgs} = case View of 
-          null ->
-            {0, null};
-          _ ->
-            Args = case proplists:get_value(<<"startkey">>, KVP, undefined) of
-                undefined ->
-                    #view_query_args{};
-                _ ->
-                    #view_query_args{
-                        start_key = proplists:get_value(<<"startkey">>, 
-														KVP, undefined), 
-                        end_key = proplists:get_value(<<"endkey">>,
-													   KVP, undefined)
-                    }
-            end,
+stream_view_intersect(Query, Options, Filters, CallBackFunc, CallBackState) ->
+  UrlString = binary_to_list(Query),
+  Parts = string:tokens(UrlString, "/"),
+
+  case Parts of
+	  [DbName, "_design", DDocName, "_view",
+				    FunctionQueryString] ->
+		  [Func | QueryParts] = string:tokens(FunctionQueryString, "?&"),
+		  {Db, View, Args} = get_db_args_view(DbName, DDocName, Func, 
+											  QueryParts, Options), 
+
+		  FoldAccInit = {Args#view_query_args.limit, Args#view_query_args.skip,
+							undefined, CallBackState},
+		  
+      	  FoldlFun = fun({{_Key, DocId}, _Value}, _OffsetReds,
+						{AccLimit, _AccSkip, _Resp, CBState}) ->
+                       {ok, {AccLimit - 1, 0, undefined,
+							 intersect_and_stream([DocId], Filters,
+									 CallBackFunc, CBState)}}
+					 end,
+
+          {ok, _LastReduce, {_, _, _, NewCallBackState}} = 
+			  						couch_view:fold(View, FoldlFun,
+									  FoldAccInit, 
+									  couch_httpd_view:make_key_options(Args)
+									),
+		  
+		  couch_db:close(Db),
+	      NewCallBackState;
+	  [_DbName, "_design", _DDocName, "_spatial", 
+				   	_FunctionQueryString] ->
+		    % stream spatial results
+		    query_spatial_view(Query, Parts, Options, true,
+				  Filters, CallBackFunc, CallBackState);
+   	    _ ->
+		 CallBackState
+  end.
+
+query_view(Query, [DbName, "_design", DDocName, "_view",
+				    FunctionQueryString], Options) ->
+  [Func | QueryParts] = string:tokens(FunctionQueryString, "?&"),
+ 
+  {Db, View, Args} = get_db_args_view(DbName, DDocName, Func, QueryParts, Options), 
+  
+  % create a bloom filter
+% using reduce results in duplicates, {dups, [...]}
+% if expand_dups works then we will go back to this approach, for now fold
+%  {ok, {{RowCount, _}, BloomFilter}} = couch_btree:fold_reduce(View#view.btree, 
+% 	fun(Start, PartialReds, Filter) ->
+%	    NewBloomFilter = case PartialReds of
+%		  {KeyList, _} ->
+%			% call View:expand_dups as needed
+%		    add_to_filter(KeyList, Filter);
+%		  _ ->
+%            Filter
+%        end,
+%	  
+%	    {ok, {couch_btree:final_reduce(
+%	      View#view.btree, 
+%	  	  PartialReds), NewBloomFilter}}
+%	  end,
+%	  bloom:sbf(?BLOOM_FILTER_SIZE), couch_httpd_view:make_key_options(Args)), 
+  FoldAccInit = {Args#view_query_args.limit, Args#view_query_args.skip,
+						undefined, {0, bloom:sbf(?BLOOM_FILTER_SIZE)}},
+  FoldlFun = fun({{_Key, DocId}, _Value}, _OffsetReds,
+						{AccLimit, _AccSkip, _Resp, {Counter, Filter}}) ->
+      	{ok, {AccLimit - 1, 0, undefined, 
+			  {Counter + 1, add_to_filter([DocId], Filter)}}}
+  end,
+      
+  {ok, _LastReduce, {_, _, _, {RowCount, BloomFilter}}} =
+	  					couch_view:fold(View, FoldlFun,
+						  FoldAccInit, couch_httpd_view:make_key_options(Args)),
+  
+  couch_db:close(Db),
+  #bloom_view_result{q=Query, options=Options, 
+					 row_count=RowCount, bloom_filter=BloomFilter};
+
+% make spatial a special case
+query_view(Query, [DbName, "_design", DDocName, "_spatial", 
+				   	FunctionQueryString], Options) ->
+	query_spatial_view(Query, [DbName, "_design", DDocName, "_spatial", 
+				   	FunctionQueryString], Options, false, [], nil, nil);
+	
+query_view(Query, [Db, ExternalFunction, FunctionQueryString], 
+				  Options) ->
+  % external functions can do what they like, 
+  % as a particular case we handle FTI
+  case ExternalFunction of
+    "_fti" ->
+      [Func | QueryParts] = string:tokens(FunctionQueryString, "?&"),
+      KVP = lists:map(fun(X) ->
+                    Idx = string:chr(X, $=),
+                    {list_to_binary(string:sub_string(X, 1, Idx-1)), 
+					 list_to_binary(string:sub_string(X, Idx+1))}
+              end,
+              QueryParts),
+         
+      % e.g. by_title?q=mask*
+      JsonRequest = {[{<<"path">>,[list_to_binary(Db), <<"_fti">>, 
+										 list_to_binary(Func)]},
+                            {<<"query">>,{KVP}}]},
+                            
+      Result = couch_external_manager:execute("fti", JsonRequest),
+
+      Rows = try couch_util:get_nested_json_value(Result, 
+													[<<"json">>, <<"rows">>])
+             catch
+               throw: {not_found, _} -> 
+				   []
+             end,
             
-            FoldAccInit = {Args#view_query_args.limit, 
-						   Args#view_query_args.skip, undefined, {0, []}},            
-            
-            FoldlFun = fun({{_Key, DocId}, _Value}, _OffsetReds,
-						    {AccLimit, AccSkip, Resp, {Counter, Acc}=State}) ->
-                case {AccLimit, AccSkip, Resp} of
-                    {0, _, _} ->
-                        % we've done "limit" rows, stop foldling
-                        {stop, {0, 0, undefined, State}};
-                    {_, AccSkip, _} when AccSkip > 0 ->
-                        % just keep skipping
-                        {ok, {AccLimit, AccSkip - 1, undefined, State}};
-                    {_, _, _} ->
-                        % count the row
-                        case IncludeId of
-                           true ->
-                            {ok, {AccLimit - 1, 0, undefined,
-								   {Counter + 1, [[DocId]|Acc]}}};
-                           _ ->
-                            {ok, {AccLimit - 1, 0, undefined, 
-								  {Counter + 1, Acc}}}
-                        end
-                end
-            end,
-            
-            {ok, _LastReduce,  {_, _, _, State}} = 
-				couch_view:fold(View, FoldlFun, FoldAccInit, 
-								couch_httpd_view:make_key_options(Args)),
-            {State, Args}
-       end,
-       #multiview_result{db=Db, view=View, row_count=RowCount,
-						  id_list=lists:umerge(IdAcc), req_query=Query,
-						  query_args=QueryArgs};
-    [DbName, "_design", DDocName, "_spatial", FunctionQueryString] ->
-        % handle spatial as a special case
-        {ok, Db} = couch_db:open(list_to_binary(DbName), Options),
+      case Rows of
+        [] ->
+		  #bloom_view_result{q=Query, options=Options};
+        _ ->
+          Ids = [couch_util:get_nested_json_value(R, [<<"id">>]) || R <- Rows],
+		  #bloom_view_result{q=Query, options=Options, row_count=length(Ids),
+				bloom_filter=add_to_filter(Ids, bloom:sbf(?BLOOM_FILTER_SIZE)),
+				id_list=Ids}
+      end;
+    _ ->
+	  #bloom_view_result{q=Query, options=Options}
+  end;
+
+query_view(_Query, _, _Options) ->
+  nil.
+
+% spatial query and streaming - special case
+query_spatial_view(Query, [DbName, "_design", DDocName, "_spatial", 
+				   	FunctionQueryString], Options, DoStream,
+				  Filters, CallBackFunc, CallBackState) ->
+  % handle spatial as a special case
+  {ok, Db} = couch_db:open(list_to_binary(DbName), Options),
         
-        % parse FunctionQueryString for SpatialName and Stale parameter
-        [SpatialName | QueryParts] = string:tokens(FunctionQueryString, "?&"),
-        KVP = lists:map(fun(X) ->
-                Idx = string:chr(X, $=),
-                {list_to_binary(string:to_lower(
+  % parse FunctionQueryString for SpatialName and Stale parameter
+  [SpatialName | QueryParts] = string:tokens(FunctionQueryString, "?&"),
+  KVP = lists:map(fun(X) ->
+                   Idx = string:chr(X, $=),
+                   {list_to_binary(string:to_lower(
 								  string:sub_string(X, 1, Idx-1))), 
 				 				  string:sub_string(X, Idx+1)}
-            end,
-            QueryParts),
+                  end,
+                  QueryParts),
         
-        Bbox = case lists:keyfind(<<"bbox">>, 1, KVP) of
-            {_, Val} ->   
-                list_to_tuple(?JSON_DECODE("[" ++ Val ++ "]"));
-            _ ->
-              []
-        end,
+  Bbox = case lists:keyfind(<<"bbox">>, 1, KVP) of
+          {_, Val} ->   
+            list_to_tuple(?JSON_DECODE("[" ++ Val ++ "]"));
+          _ ->
+            []
+         end,
 
-        Stale = case lists:keyfind("stale", 1, KVP) of
+  Stale = case lists:keyfind("stale", 1, KVP) of
             {_, StaleVal} ->
                StaleVal;
             _ ->
               nil
-        end,
+          end,
         
-        {ok, Index, Group} = couch_spatial:get_spatial_index(
+  {ok, Index, Group} = couch_spatial:get_spatial_index(
             Db, list_to_binary("_design/" ++ DDocName), 
 					list_to_binary(SpatialName), Stale),
             
-        % create a FoldFun and FoldAccInit
-        FoldAccInit = {undefined, {0, []}},
-        FoldFun =  fun({_Bbox, DocId, _Value}, {undefined, {Counter, Acc}}) ->
-            case IncludeId of
-               true ->
-                 {ok, {undefined, {Counter + 1, [[DocId]|Acc]}}};
-               _ ->
-                 {ok, {undefined, {Counter + 1, Acc}}}
-            end
-        end,        
-            
-        {ok, {_, {RowCount, Acc}}} = couch_spatial:fold(Group, 
-						Index, FoldFun, FoldAccInit, Bbox),    
-       
-        #multispatial_result{db=Db, row_count=RowCount, 
-							 id_list=lists:umerge(Acc), req_query=Query,
-							  group=Group, index=Index, bbox=Bbox};
-    [Db, ExternalFunction, FunctionQueryString] ->
-       % external functions can do what they like, 
-	   % as a particular case we handle FTI
-       case ExternalFunction of
-         "_fti" ->
-            [Func | QueryParts] = string:tokens(FunctionQueryString, "?&"),
-            KVP = lists:map(fun(X) ->
-                    Idx = string:chr(X, $=),
-                    {list_to_binary(string:sub_string(X, 1, Idx-1)), 
-					 list_to_binary(string:sub_string(X, Idx+1))}
-                end,
-                QueryParts),
-         
-            % e.g. by_title?q=mask*
-            JsonRequest = {[{<<"path">>,[list_to_binary(Db), <<"_fti">>, 
-										 list_to_binary(Func)]},
-                            {<<"query">>,{KVP}}]},
-                            
-            Result = couch_external_manager:execute("fti", JsonRequest),
-
-            Rows = try couch_util:get_nested_json_value(Result, 
-													[<<"json">>, <<"rows">>])
-            catch
-              throw: {not_found, _} -> #multiexternal_result{}
-            end,
-            
-            case Rows of
-              [] ->
-                #multiexternal_result{};
-              _ ->
-                Ids = lists:map(fun(R) ->
-                        try couch_util:get_nested_json_value(R, [<<"id">>])
-                        catch
-                          throw: {not_found, _} -> []
-                        end
-                     end,
-                     Rows),
-                
-                 % review this, should we try an paginate external fti server?
-                 % put the result in a form suitable for umerge
-                 #multiexternal_result{row_count=length(Ids), 
-									  id_list=lists:umerge([[Id] || Id <- Ids])}
-            end;
-          _ ->
-           #multiexternal_result{}
-       end;
-    _ ->
-      % no match return 0
-      {view, nil, [], 0, Query}
-  end.
+  % create a FoldFun and FoldAccInit
+  case DoStream of 
+	  true ->
+	  	FoldAccInit = {undefined, CallBackState},
+        FoldFun = fun({_Bbox, DocId, _Value}, {undefined, CBState}) ->
+                {ok, {undefined, intersect_and_stream([DocId], Filters,
+									 CallBackFunc, CBState)}}
+        end,
+        
+        {ok, {_, NewCallBackState}} = couch_spatial:fold(Group, Index, FoldFun,
+			FoldAccInit, Bbox), 
+		couch_db:close(Db),
+		NewCallBackState;
+	  _ ->
   
-write_single_response([], CallBackFunc, CallBackState) ->
-  CallBackFunc({finished, []}, CallBackState);
+        FoldAccInit = {undefined, {0, bloom:sbf(?BLOOM_FILTER_SIZE), []}},
+        FoldFun =  fun({_Bbox, DocId, _Value}, 
+					   {undefined, {Counter, Filter, Acc}}) ->
+               {ok, {undefined, {Counter + 1, bloom:add(DocId, Filter), 
+								 [DocId|Acc]}}}
+             end,        
+            
+        {ok, {_, {RowCount, BloomFilter, Acc}}} = couch_spatial:fold(Group, 
+						Index, FoldFun, FoldAccInit, Bbox),    
+   
+        couch_db:close(Db),
+        #bloom_view_result{q=Query, options=Options, 
+					 row_count=RowCount, bloom_filter=BloomFilter,
+					 id_list=Acc}
+  end.
 
-write_single_response([Id | Rem], CallBackFunc, CallBackState) ->
-  NewState = CallBackFunc(Id, CallBackState),
-  write_single_response(Rem, CallBackFunc, NewState). 
+get_db_args_view(DbName, DDocName, Func, QueryParts, Options) ->
+  KVP = lists:map(fun(X) ->
+            Idx = string:chr(X, $=),
+            {list_to_binary(string:to_lower(string:sub_string(X, 1, Idx-1))),
+				  ?JSON_DECODE(string:sub_string(X, Idx+1))}
+          end,
+          QueryParts),
+  
+  {ok, Db} = couch_db:open(list_to_binary(DbName), Options),
+  
+  {View, _Group} = case couch_view:get_map_view(Db, 
+										list_to_binary(["_design/", DDocName]),
+	                                    list_to_binary(Func), nil) of
+    {ok, V, G} ->
+      {V, G}; 
+    {not_found, _Reason} ->
+      case couch_view:get_reduce_view(Db, 
+						list_to_binary(["_design/", DDocName]),
+					    list_to_binary(Func), nil) of
+        {ok, ReduceView, G} ->
+          % get the map view
+          {couch_view:extract_map_view(ReduceView), G};
+        _ ->
+          {null, null}
+      end
+  end,
+  
+  Args = case proplists:get_value(<<"startkey">>, KVP, undefined) of
+           undefined ->
+              #view_query_args{};
+           _ ->
+              #view_query_args{
+                 start_key = proplists:get_value(<<"startkey">>, 
+						     KVP, undefined), 
+                 end_key = proplists:get_value(<<"endkey">>,
+					         KVP, undefined)
+              }
+          end,
+  {Db, View, Args}.
+
+add_to_filter([{{_Key, Id}, _Val}|Rem], BloomFilter) -> 
+  NewBloomFilter = bloom:add(Id, BloomFilter),
+  add_to_filter(Rem, NewBloomFilter);
+
+add_to_filter([], BloomFilter) ->
+	BloomFilter;
+
+add_to_filter([Id | Rem], BloomFilter) ->
+  NewBloomFilter = bloom:add(Id, BloomFilter),
+  add_to_filter(Rem, NewBloomFilter);
+
+add_to_filter(_, BloomFilter) ->
+  BloomFilter.
+
+intersect_and_stream([], _Filters, _CallBackFunc, CallBackState) ->
+	CallBackState;
+
+intersect_and_stream([Id | Rem], [], CallBackFunc, CallBackState) ->
+	intersect_and_stream(Rem, [], CallBackFunc,
+						 stream_result(Id, CallBackFunc, CallBackState));
+
+intersect_and_stream([Id | Rem], Filters, CallBackFunc, CallBackState) ->
+	case intersection(Id, Filters) of
+		true ->
+		  NewCallBackState = stream_result(Id, CallBackFunc, CallBackState),
+		  intersect_and_stream(Rem, Filters, CallBackFunc, NewCallBackState);
+		_ ->
+          CallBackState
+    end.
+
+intersection(_DocId, []) ->
+	true;
+
+intersection(DocId, [#bloom_view_result{bloom_filter = Filter} | Rem]) ->
+  case bloom:member(DocId, Filter) of
+    true ->
+      intersection(DocId, Rem);
+    _ ->
+     false
+  end.
+
+stream_result([], _CallBackFunc, CallBackState) ->
+  CallBackState;
+
+stream_result([DocId|Rem], CallBackFunc, CallBackState) ->
+  stream_result(Rem, CallBackFunc, CallBackFunc(DocId, CallBackState));
+
+stream_result(DocId, CallBackFunc, CallBackState) ->
+  CallBackFunc(DocId, CallBackState).
+
