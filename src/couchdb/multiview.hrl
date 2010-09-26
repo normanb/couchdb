@@ -11,8 +11,8 @@
 % the License.
 
 -record(bloom_view_result, {q=null, options = null, 
-						     row_count = 0, id_list = null,
-							 bloom_filter = null}).
+    row_count = 0, id_list = null,
+	bloom_filter = null}).
 
 -define(BLOOM_FILTER_SIZE, 27000).
 -define(MULTI_ROWCOUNT_ELEMENT, 4).
