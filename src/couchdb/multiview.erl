@@ -142,12 +142,12 @@ query_view(Query, [DbName, "_design", DDocName, "_view",
       	{ok, {AccLimit - 1, 0, undefined, 
 		{Counter + 1, add_to_filter([DocId], Filter)}}}
     end,
-      
+    
     {ok, _LastReduce, {_, _, _, {RowCount, BloomFilter}}} =
 	    couch_view:fold(View, FoldlFun,
 		FoldAccInit, couch_httpd_view:make_key_options(Args)),
-  
-    couch_db:close(Db),
+
+	couch_db:close(Db),
     #bloom_view_result{q=Query, options=Options, 
 	row_count=RowCount, bloom_filter=BloomFilter};
 
@@ -156,11 +156,60 @@ query_view(Query, [DbName, "_design", DDocName, "_spatial",
 	FunctionQueryString], Options) ->
     query_spatial_view(Query, [DbName, "_design", DDocName, "_spatial", 
 	    FunctionQueryString], Options, false, [], nil, nil);
-	
+
+% java lucene fti
+query_view(Query, [Db, Handler, "_design", DDoc, FunctionQueryString], Options) ->
+    case Handler of 
+	"_fti" ->
+		% query external fti handler
+		[Func | QueryParts] = string:tokens(FunctionQueryString, "?&"),
+		KVP = lists:map(fun(X) ->
+            Idx = string:chr(X, $=),
+            {?l2b(string:sub_string(X, 1, Idx-1)), 
+			?l2b(string:sub_string(X, Idx+1))}
+        end,
+        QueryParts),
+		JsonRequest= {[{<<"method">>, <<"GET">>}, {<<"path">>, [?l2b(Db), <<"_fti">>,
+		    <<"_design">>, ?l2b(DDoc), ?l2b(Func)]},
+			{<<"query">>,{KVP}}]},
+
+		Output = couch_external_manager:execute("fti", JsonRequest),
+        
+		ResultStr = try couch_util:get_nested_json_value(Output, 
+		    [<<"body">>])
+        catch
+            throw: {not_found, _} -> 
+			    []
+        end,
+       
+		Result = ?JSON_DECODE(?b2l(ResultStr)),
+		Rows =  try couch_util:get_nested_json_value(Result, 
+		    [<<"rows">>])
+        catch
+            throw: {not_found, _} -> 
+			    []
+        end,
+		 
+        case Rows of
+        [] ->
+		    #bloom_view_result{q=Query, options=Options};
+        _ ->
+            Ids = [couch_util:get_nested_json_value(R, [<<"id">>]) ||
+			    R <- Rows],
+		    #bloom_view_result{q=Query, options=Options, row_count=length(Ids),
+				bloom_filter=add_to_filter(Ids, bloom:sbf(?BLOOM_FILTER_SIZE)),
+				id_list=Ids}
+        end;
+	_ ->
+	    #bloom_view_result{q=Query, options=Options}
+	end;
+
+% TODO dump this function and amalgamate with java lucene
 query_view(Query, [Db, ExternalFunction, FunctionQueryString], Options) ->
     % external functions can do what they like, 
-    % as a particular case we handle FTI
+    % as a particular case we handle CLucene FTI	
     case ExternalFunction of
+    % clucene fti
     "_fti" ->
         [Func | QueryParts] = string:tokens(FunctionQueryString, "?&"),
         KVP = lists:map(fun(X) ->
@@ -176,7 +225,7 @@ query_view(Query, [Db, ExternalFunction, FunctionQueryString], Options) ->
         {<<"query">>,{KVP}}]},
                             
         Result = couch_external_manager:execute("fti", JsonRequest),
-
+		
         Rows = try couch_util:get_nested_json_value(Result, 
 		    [<<"json">>, <<"rows">>])
         catch
